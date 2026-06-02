@@ -13,6 +13,18 @@ import traceback
 from typing import List, Dict, Any
 
 
+def _parse_bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of: true, false, 1, 0, yes, no, on, off")
+
+
 def string_to_uuid(input_string: str) -> str:
     """Convert string to deterministic UUID."""
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, str(input_string)))
@@ -80,15 +92,37 @@ class MessageClient:
             return task_list
     
     def _load_config(self) -> Dict:
-        """Load config from yaml."""
+        """Load config from yaml, then apply per-run environment overrides."""
         config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
         try:
             import yaml
             with open(config_path, 'r') as f:
-                return yaml.safe_load(f)
+                config = yaml.safe_load(f) or {}
         except:
-            return {
+            config = {
                 'search_engine': 'google',
                 'search_top_k': 10,
                 'cache_dir': './cache/tool_cache',
             }
+
+        config['mock_mode'] = _parse_bool_env(
+            'IGPO_MOCK_SEARCH',
+            config.get('mock_mode', False),
+        )
+        if os.environ.get('IGPO_SEARCH_ENGINE'):
+            config['search_engine'] = os.environ['IGPO_SEARCH_ENGINE']
+        if os.environ.get('IGPO_SERPER_API_KEY'):
+            config['serper_api_key'] = os.environ['IGPO_SERPER_API_KEY']
+        if os.environ.get('IGPO_AZURE_BING_SEARCH_SUBSCRIPTION_KEY'):
+            config['azure_bing_search_subscription_key'] = os.environ[
+                'IGPO_AZURE_BING_SEARCH_SUBSCRIPTION_KEY'
+            ]
+        if os.environ.get('IGPO_LOCAL_SEARCH_URL'):
+            config['local_search_url'] = os.environ['IGPO_LOCAL_SEARCH_URL']
+        if os.environ.get('IGPO_LOCAL_SEARCH_TOPK'):
+            config['local_search_topk'] = int(os.environ['IGPO_LOCAL_SEARCH_TOPK'])
+        if os.environ.get('IGPO_LOCAL_SEARCH_TIMEOUT_SECONDS'):
+            config['local_search_timeout_seconds'] = float(
+                os.environ['IGPO_LOCAL_SEARCH_TIMEOUT_SECONDS']
+            )
+        return config

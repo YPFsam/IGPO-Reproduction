@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools_server.util import MessageClient
 from tools_server.handler import Handler
-from tools_server.search.search_api import web_search, mock_search_results
+from tools_server.search.search_api import web_search, mock_search_results, local_tantivy_search
 
 
 def test_mock_search():
@@ -60,10 +60,66 @@ def test_web_search_with_mock():
     return True
 
 
+def test_local_tantivy_search():
+    """Test flat, list, and DR-Venus grouped local-search responses."""
+    print("\n" + "=" * 60)
+    print("Test 3: Local Tantivy Adapter")
+    print("=" * 60)
+
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from threading import Thread
+
+    class LocalSearchHandler(BaseHTTPRequestHandler):
+        response_bodies = [
+            {"results": [{"query": "q", "passages": [{"title": "Grouped", "text": "grouped body"}]}]},
+            [{"title": "List", "text": "list body"}],
+            {"results": [{"title": "Flat", "snippet": "flat body"}]},
+        ]
+        requests = []
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            LocalSearchHandler.requests.append(json.loads(self.rfile.read(length)))
+            body = json.dumps(LocalSearchHandler.response_bodies.pop(0)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), LocalSearchHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = {
+        "local_search_url": f"http://127.0.0.1:{server.server_port}/search",
+        "local_search_topk": 5,
+    }
+
+    try:
+        grouped = local_tantivy_search("q", config)
+        listed = local_tantivy_search("q", config)
+        flat = local_tantivy_search("q", config)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert grouped[0]["snippet"] == "grouped body", grouped
+    assert listed[0]["snippet"] == "list body", listed
+    assert flat[0]["snippet"] == "flat body", flat
+    assert LocalSearchHandler.requests[0]["queries"] == ["q"]
+    assert LocalSearchHandler.requests[0]["topk"] == 5
+    print("✓ Local Tantivy response variants are compatible")
+    print("✓ Test passed!")
+    return True
+
+
 def test_handler_processing():
     """Test Handler processing with mock mode."""
     print("\n" + "=" * 60)
-    print("Test 3: Handler Task Processing")
+    print("Test 4: Handler Task Processing")
     print("=" * 60)
     
     config = {
@@ -124,7 +180,7 @@ def test_handler_processing():
 def test_message_client():
     """Test MessageClient integration."""
     print("\n" + "=" * 60)
-    print("Test 4: MessageClient Integration")
+    print("Test 5: MessageClient Integration")
     print("=" * 60)
     
     # Patch config to use mock mode
@@ -164,10 +220,41 @@ def test_message_client():
     return True
 
 
+def test_message_client_env_overrides():
+    """Test per-run environment overrides without editing tracked config."""
+    print("\n" + "=" * 60)
+    print("Test 6: MessageClient Environment Overrides")
+    print("=" * 60)
+
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {
+        "IGPO_MOCK_SEARCH": "false",
+        "IGPO_SEARCH_ENGINE": "local",
+        "IGPO_SERPER_API_KEY": "serper-test-key",
+        "IGPO_AZURE_BING_SEARCH_SUBSCRIPTION_KEY": "bing-test-key",
+        "IGPO_LOCAL_SEARCH_URL": "http://localhost:9999/search",
+        "IGPO_LOCAL_SEARCH_TOPK": "7",
+        "IGPO_LOCAL_SEARCH_TIMEOUT_SECONDS": "2.5",
+    }):
+        config = MessageClient()._load_config()
+
+    assert config["mock_mode"] is False
+    assert config["search_engine"] == "local"
+    assert config["serper_api_key"] == "serper-test-key"
+    assert config["azure_bing_search_subscription_key"] == "bing-test-key"
+    assert config["local_search_url"] == "http://localhost:9999/search"
+    assert config["local_search_topk"] == 7
+    assert config["local_search_timeout_seconds"] == 2.5
+    print("✓ Environment overrides loaded correctly")
+    print("✓ Test passed!")
+    return True
+
+
 def test_invalid_tool_call():
     """Test handling of invalid tool calls."""
     print("\n" + "=" * 60)
-    print("Test 5: Invalid Tool Call Handling")
+    print("Test 7: Invalid Tool Call Handling")
     print("=" * 60)
     
     config = {
@@ -213,7 +300,7 @@ def test_invalid_tool_call():
 def test_cache_functionality():
     """Test cache read/write functionality."""
     print("\n" + "=" * 60)
-    print("Test 6: Cache Functionality")
+    print("Test 8: Cache Functionality")
     print("=" * 60)
     
     import tempfile
@@ -275,8 +362,10 @@ def main():
     tests = [
         ("Mock Search", test_mock_search),
         ("Web Search with Mock", test_web_search_with_mock),
+        ("Local Tantivy Adapter", test_local_tantivy_search),
         ("Handler Processing", test_handler_processing),
         ("MessageClient Integration", test_message_client),
+        ("MessageClient Environment Overrides", test_message_client_env_overrides),
         ("Invalid Tool Call Handling", test_invalid_tool_call),
         ("Cache Functionality", test_cache_functionality),
     ]

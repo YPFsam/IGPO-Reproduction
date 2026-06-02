@@ -4,7 +4,7 @@ Lightweight web search tool server for IGPO training.
 
 ## Quick Start
 
-1. Get a Serper API key from https://serper.dev/ (2,500 free searches)
+1. Choose Serper, Bing, mock mode, or a local Tantivy server.
 
 2. Edit `config.yaml`:
 ```yaml
@@ -22,12 +22,29 @@ search_top_k: 10            # results per query
 serper_api_key: "xxx"       # Serper API key
 ```
 
+Per-run environment variables override `config.yaml` without modifying tracked
+files:
+
+```bash
+IGPO_MOCK_SEARCH=true bash train_1gpu_mock.sh
+
+IGPO_MOCK_SEARCH=false \
+IGPO_SEARCH_ENGINE=local \
+IGPO_LOCAL_SEARCH_URL=http://localhost:8890/search \
+  bash train_1gpu_mock.sh local
+
+IGPO_SERPER_API_KEY='<serper-key>' \
+  bash train_1gpu_mock.sh online
+```
+
 ## Supported Search Engines
 
-| Engine | Provider | Free Tier |
-|--------|----------|-----------|
-| Google | Serper API | 2,500 searches |
+| Engine | Provider | Notes |
+|--------|----------|-------|
+| Google | Serper API | 2,500 free searches |
 | Bing | Azure | Pay as you go |
+| Local | Tantivy HTTP server | Compatible with the DR-Venus local-search adapter |
+| Mock | Built-in deterministic snippets | Pipeline checks only |
 
 ## Files
 

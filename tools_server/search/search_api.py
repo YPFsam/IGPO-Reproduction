@@ -4,6 +4,7 @@ IGPO Tool Server - Web Search API
 Supports:
 - Serper API (Google search)
 - Azure Bing Search API
+- Local Tantivy HTTP search
 
 Reference: DeepResearcher/scrl/handler/web_search_agent/search/search_api.py
 """
@@ -191,9 +192,14 @@ def local_tantivy_search(query: str, config: Dict[str, Any]) -> List[Dict]:
     """
     Search using a local tantivy search server (e.g., from DR-Venus-LocalSearch).
 
-    The server should expose a POST /search endpoint that accepts JSON:
-        {"query": "...", "top_k": N}
-    and returns JSON: {"results": [{"title": "...", "text": "...", "score": ...}, ...]}
+    The server should expose a POST /search endpoint. The request includes both
+    the flat and DR-Venus field names so either style can be used:
+        {"query": "...", "top_k": N, "queries": ["..."], "topk": N}
+
+    Supported response styles:
+        {"results": [{"title": "...", "text": "...", "score": ...}, ...]}
+        {"results": [{"query": "...", "passages": [{...}, ...]}]}
+        [{"title": "...", "text": "...", "score": ...}, ...]
 
     Args:
         query: Search query
@@ -204,22 +210,40 @@ def local_tantivy_search(query: str, config: Dict[str, Any]) -> List[Dict]:
     """
     server_url = config.get('local_search_url', 'http://localhost:8890/search')
     topk = config.get('local_search_topk', 5)
+    timeout = config.get('local_search_timeout_seconds', 10)
 
     try:
         response = requests.post(
             server_url,
-            json={"query": query, "top_k": topk},
-            timeout=30,
+            json={"query": query, "top_k": topk, "queries": [query], "topk": topk},
+            timeout=timeout,
         )
         response.raise_for_status()
         data = response.json()
 
+        raw_results = data.get("results", []) if isinstance(data, dict) else data
+        if not isinstance(raw_results, list):
+            raise ValueError("Local search response must contain a list of results")
+
+        passages = []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            nested_passages = item.get("passages")
+            if isinstance(nested_passages, list):
+                passages.extend(nested_passages)
+            else:
+                passages.append(item)
+
         results = []
-        for item in data.get("results", data if isinstance(data, list) else [])[:topk]:
+        for item in passages[:topk]:
+            if not isinstance(item, dict):
+                continue
+            snippet = item.get("text") or item.get("snippet") or item.get("passage") or ""
             results.append({
-                "title": item.get("title", ""),
-                "link": item.get("url", item.get("link", "")),
-                "snippet": item.get("text", item.get("snippet", item.get("passage", "")))[:500],
+                "title": item.get("title") or "",
+                "link": item.get("url") or item.get("link") or "",
+                "snippet": str(snippet)[:500],
             })
 
         print(f"[Search] Local tantivy search: {len(results)} results for '{query[:50]}'")

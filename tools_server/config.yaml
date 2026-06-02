@@ -21,6 +21,7 @@ azure_bing_search_mkt: "en-US"
 # Local search (tantivy) - used when search_engine is "local"
 local_search_url: "http://localhost:8890/search"
 local_search_topk: 5
+local_search_timeout_seconds: 10
 
 # Cache Configuration
 cache_dir: "./cache/tool_cache"

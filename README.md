@@ -137,6 +137,54 @@ bash evaluate.sh
 
 </details>
 
+## 🧪 Resource-Constrained Smoke Test
+
+The bundled single-GPU script reduces the original eight-GPU training recipe
+to a small pipeline check. Its default mock-search mode exercises rollout,
+tool calls, IGPO reward construction, and actor updates without consuming a
+search API quota:
+
+```bash
+bash train_1gpu_mock.sh
+```
+
+Use a DR-Venus-compatible local Tantivy server for a small offline-search run:
+
+```bash
+bash train_1gpu_mock.sh local
+```
+
+Use the configured Serper or Bing API for a small real-search run:
+
+```bash
+bash train_1gpu_mock.sh online
+```
+
+The larger `full`, `online-full`, and `local-full` modes use 200 training rows
+and 10 steps:
+
+```bash
+bash train_1gpu_mock.sh full
+bash train_1gpu_mock.sh online-full
+bash train_1gpu_mock.sh local-full
+```
+
+Smoke runs default to `SAVE_FREQ=-1` and use separate output directories for
+each mode. Test checkpoint saving explicitly after the compute path is stable:
+
+```bash
+SAVE_FREQ=3 bash train_1gpu_mock.sh
+```
+
+Mock mode is an engineering check only. Its generated snippets do not provide
+real evidence, so it cannot reproduce the paper's reported search-agent
+metrics.
+
+Before allocating RL workers, the script checks the Python stack, local model
+path, smoke datasets, visible GPU count, and GPU memory. It expects one visible
+80 GB GPU by default. Use `ALLOW_LOW_MEMORY_GPU=true` only for an intentional
+lower-memory experiment.
+
 ## 📄 Citation
 If you find our code or work useful for your research, please cite our work.
 ```bibtex
