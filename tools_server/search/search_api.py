@@ -34,7 +34,10 @@ def web_search(query: str, config: Dict[str, Any]) -> List[Dict]:
         return mock_search_results(query)
     
     search_engine = config.get('search_engine', 'google')
-    
+
+    if search_engine == 'local':
+        return local_tantivy_search(query, config)
+
     if search_engine == 'google':
         return serper_google_search(
             query=query,
@@ -182,6 +185,49 @@ def azure_bing_search(
     
     print(f"[Search] Bing search failed after {max_retries} attempts")
     return []
+
+
+def local_tantivy_search(query: str, config: Dict[str, Any]) -> List[Dict]:
+    """
+    Search using a local tantivy search server (e.g., from DR-Venus-LocalSearch).
+
+    The server should expose a POST /search endpoint that accepts JSON:
+        {"query": "...", "top_k": N}
+    and returns JSON: {"results": [{"title": "...", "text": "...", "score": ...}, ...]}
+
+    Args:
+        query: Search query
+        config: Configuration with local_search_url and local_search_topk
+
+    Returns:
+        List of search results with 'title', 'link', 'snippet' keys
+    """
+    server_url = config.get('local_search_url', 'http://localhost:8890/search')
+    topk = config.get('local_search_topk', 5)
+
+    try:
+        response = requests.post(
+            server_url,
+            json={"query": query, "top_k": topk},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        results = []
+        for item in data.get("results", data if isinstance(data, list) else [])[:topk]:
+            results.append({
+                "title": item.get("title", ""),
+                "link": item.get("url", item.get("link", "")),
+                "snippet": item.get("text", item.get("snippet", item.get("passage", "")))[:500],
+            })
+
+        print(f"[Search] Local tantivy search: {len(results)} results for '{query[:50]}'")
+        return results
+
+    except Exception as e:
+        print(f"[Search] Local tantivy search error: {e}")
+        return []
 
 
 # For local wiki search (optional, requires separate setup)

@@ -3,9 +3,9 @@
 # =============================================================================
 
 # Mock Mode: Set to true to use fake search results (for testing without network)
-mock_mode: false
+mock_mode: true
 
-# Search Engine: "google" (Serper API) or "bing" (Azure Bing)
+# Search Engine: "google" (Serper API), "bing" (Azure Bing), or "local" (tantivy server)
 search_engine: "google"
 search_top_k: 10
 search_region: "us"
@@ -17,6 +17,10 @@ serper_api_key: ""
 # Azure Bing Search (alternative) - Get key from Azure Portal
 azure_bing_search_subscription_key: ""
 azure_bing_search_mkt: "en-US"
+
+# Local search (tantivy) - used when search_engine is "local"
+local_search_url: "http://localhost:8890/search"
+local_search_topk: 5
 
 # Cache Configuration
 cache_dir: "./cache/tool_cache"
