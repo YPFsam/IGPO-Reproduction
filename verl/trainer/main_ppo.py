@@ -16,8 +16,24 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import os
+import signal
+import traceback
 
 import hydra
+
+
+def _sigterm_handler(signum, frame):
+    import sys
+    msg = (f"\n{'='*60}\n[SIGTERM CAUGHT] pid={os.getpid()} signal={signum}\n"
+           f"Stack trace:\n{''.join(traceback.format_stack(frame))}\n{'='*60}\n")
+    print(msg, flush=True)
+    with open("/root/IGPO-official/sigterm_debug.log", "a") as f:
+        f.write(msg)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
 import ray
 
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
@@ -70,8 +86,18 @@ def run_ppo(config) -> None:
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not ray.is_initialized():
         # this is for local ray cluster
+        # Forward IGPO search config to Ray workers
+        _env_vars = {
+            "TOKENIZERS_PARALLELISM": "true",
+            "NCCL_DEBUG": "WARN",
+            "VLLM_LOGGING_LEVEL": "WARN",
+        }
+        for _key in ["IGPO_MOCK_SEARCH", "IGPO_SEARCH_ENGINE", "IGPO_SERPER_API_KEY",
+                      "IGPO_LOCAL_SEARCH_URL", "IGPO_LOCAL_SEARCH_TOPK", "PET_NODE_RANK"]:
+            if _key in os.environ:
+                _env_vars[_key] = os.environ[_key]
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},
+            runtime_env={"env_vars": _env_vars},
             num_cpus=config.ray_init.num_cpus,
         )
 
@@ -160,7 +186,7 @@ class TaskRunner:
             mapping[Role.RefPolicy] = global_pool_id
 
         reward_fn = load_train_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_valid_reward_manager(config, tokenizer, num_examine=1)
+        val_reward_fn = load_valid_reward_manager(config, tokenizer, num_examine=3)
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         trainer = RayPPOTrainer(

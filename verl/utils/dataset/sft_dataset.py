@@ -57,12 +57,15 @@ class SFTDataset(Dataset):
             tokenizer = hf_tokenizer(tokenizer)
         self.tokenizer: PreTrainedTokenizer = tokenizer
 
-        self.prompt_key = prompt_key if isinstance(prompt_key, (tuple, list)) else [prompt_key]
-        self.response_key = response_key if isinstance(response_key, (tuple, list)) else [response_key]
+        # Keep prompt_key/response_key as-is for single-column lookups
+        # (dataframe["col"] returns Series, dataframe[["col"]] returns DataFrame)
+        self.prompt_key = prompt_key
+        self.response_key = response_key
         self.prompt_dict_keys = prompt_dict_keys if prompt_dict_keys else []
         self.response_dict_keys = response_dict_keys if response_dict_keys else []
 
         self.max_length = max_length
+        self.preformatted = config.get("preformatted", False)
 
         self._download()
         self._read_files_and_tokenize()
@@ -115,19 +118,27 @@ class SFTDataset(Dataset):
         prompt = self.prompts[item]
         response = self.responses[item]
 
-        # apply chat template
-        prompt_chat = [{"role": "user", "content": prompt}]
+        # Support pre-formatted prompts that already contain chat template tokens.
+        # When `preformatted` is set (or prompt contains <|im_start|>), skip
+        # apply_chat_template and tokenize the raw strings directly.
+        preformatted = self.preformatted
+        if not preformatted and isinstance(prompt, str):
+            preformatted = "<|im_start|>" in prompt or "<|begin_of_text|>" in prompt
 
-        # string
-        prompt_chat_str = tokenizer.apply_chat_template(prompt_chat, add_generation_prompt=True, tokenize=False)
-        response_chat_str = response + tokenizer.eos_token
+        if preformatted:
+            prompt_str = prompt
+            response_str = response + tokenizer.eos_token
+        else:
+            prompt_chat = [{"role": "user", "content": prompt}]
+            prompt_str = tokenizer.apply_chat_template(prompt_chat, add_generation_prompt=True, tokenize=False)
+            response_str = response + tokenizer.eos_token
 
         # tokenize
-        prompt_ids_output = tokenizer(prompt_chat_str, return_tensors="pt", add_special_tokens=False)
+        prompt_ids_output = tokenizer(prompt_str, return_tensors="pt", add_special_tokens=False)
         prompt_ids = prompt_ids_output["input_ids"][0]
         prompt_attention_mask = prompt_ids_output["attention_mask"][0]
 
-        response_ids_output = tokenizer(response_chat_str, return_tensors="pt", add_special_tokens=False)
+        response_ids_output = tokenizer(response_str, return_tensors="pt", add_special_tokens=False)
         response_ids = response_ids_output["input_ids"][0]
         response_attention_mask = response_ids_output["attention_mask"][0]
 

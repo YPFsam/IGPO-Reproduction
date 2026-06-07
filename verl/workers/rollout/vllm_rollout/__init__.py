@@ -38,7 +38,13 @@ else:
     package_version = get_version(package_name)
 ###
 
-if package_version <= "0.6.3":
+if package_version is not None:
+    from packaging.version import Version
+    _use_spmd = Version(package_version) > Version("0.6.3")
+else:
+    _use_spmd = False
+
+if not _use_spmd:
     vllm_mode = "customized"
     from .fire_vllm_rollout import FIREvLLMRollout  # noqa: F401
     from .vllm_rollout import vLLMRollout  # noqa: F401

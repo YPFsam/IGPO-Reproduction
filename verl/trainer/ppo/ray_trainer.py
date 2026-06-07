@@ -1397,12 +1397,30 @@ class RayPPOTrainer:
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-                
+
+                # Print step-level metrics to console for monitoring
+                step = self.global_steps
+                reward_key = None
+                for k in metrics:
+                    if 'reward' in k.lower() and 'mean' in k.lower():
+                        reward_key = k
+                        break
+                reward_str = f" reward={metrics[reward_key]:.4f}" if reward_key else ""
+                loss_key = None
+                for k in metrics:
+                    if 'loss' in k.lower() and 'actor' in k.lower():
+                        loss_key = k
+                        break
+                loss_str = f" loss={metrics[loss_key]:.4f}" if loss_key else ""
+                print(f"[STEP {step}/{self.total_training_steps}]{reward_str}{loss_str} metrics={metrics}")
+
+                # Always log to tensorboard for real-time monitoring
+                logger.log(data=metrics, step=self.global_steps)
+
                 if is_last_step or (self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0):
                     val_data_dir = self.config.trainer.get("validation_data_dir", None)
                     if val_data_dir:
                         json.dump(metrics,open(f'{val_data_dir}/metric_step_{self.global_steps}.json','w'))
-                    logger.log(data=metrics, step=self.global_steps)
 
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")

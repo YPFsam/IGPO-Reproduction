@@ -7,15 +7,15 @@ from typing import Dict, Any
 # Web Search Tool Definition
 WEB_SEARCH_TOOL = {
     "name": "web_search",
-    "description": "Search the web for information using Google or Bing.",
+    "description": "Search a local knowledge base using keyword-based search. Use concise English keywords (2-5 words). For multi-hop questions, search one step at a time.",
     "inputs": {
         "query": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "A list of search queries (1-3 queries recommended)"
+            "description": "A list of 1-3 short keyword queries. Use specific names and nouns, not full sentences."
         }
     },
-    "example": {"query": ["What is the capital of France?", "Paris population 2024"]}
+    "example": {"query": ["Martin Frič director", "Martin Frič death date"]}
 }
 
 

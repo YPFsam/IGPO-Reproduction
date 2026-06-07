@@ -15,7 +15,10 @@ def check_tags_balance(solution_str: str) -> bool:
         bool: Whether all tags are properly paired
     """
     # Tag pairs to check
-    tags_to_check = ['code', 'tool_call', 'think', 'answer']
+    # Note: 'think' is NOT checked because the first <think$gt; is injected by Qwen3 chat template
+    # into the prompt (not the response). The response only contains the closing </think$gt; for
+    # the first turn, so tags will always appear imbalanced in the response alone.
+    tags_to_check = ['code', 'tool_call', 'answer']
     
     for tag in tags_to_check:
         # Count start and end tags

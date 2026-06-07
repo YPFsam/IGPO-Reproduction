@@ -285,7 +285,7 @@ class LLMGenerationManager:
         """Run main LLM generation loop."""
 
 
-        node_rank = int(os.environ["PET_NODE_RANK"])
+        node_rank = int(os.environ.get("PET_NODE_RANK", 0))
         print(f"node {node_rank} gains {len(gen_batch.batch['input_ids'])} * {self.config.n} datas!", flush=True)
         query_contents = self.parse_question(gen_batch.batch['input_ids'])
         
@@ -433,10 +433,10 @@ class LLMGenerationManager:
     
             think = True
             
-            if think:
-                rollings_active = [rolling + "<think>" for rolling in rollings_active]
-            else:
-                rollings_active = [rolling for rolling in rollings_active]
+            # Qwen3 chat template with add_generation_prompt=True already appends "​​​​​​​\n"
+            # Do NOT append another one here - duplicate think tags cause
+            # check_tags_balance to fail (31/32 format errors).
+            # Old: rollings_active = [rolling + "​​​​​​​" for rolling in rollings_active]
             
             rollings_active = self.tokenizer(rollings_active, return_tensors="pt", padding=True)
                 
@@ -673,11 +673,17 @@ class LLMGenerationManager:
                         }
                     )
                     try:
+                        # Serialize search results to string for Qwen3 chat template compatibility
+                        raw_content = tool_call_list[i]['content']
+                        if isinstance(raw_content, (list, dict)):
+                            content_str = json.dumps(raw_content, ensure_ascii=False)
+                        else:
+                            content_str = str(raw_content) if raw_content else 'No results'
                         messages_list[tool_call_list[i]['idx']].append(
                             {
-                                "role": "tool", 
+                                "role": "tool",
                                 "name": tool_call_list[i]['tool_call']['name'],
-                                "content": tool_call_list[i]['content']
+                                "content": content_str
                             }
                         )
                     except:

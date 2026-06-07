@@ -220,7 +220,23 @@ def rearrange_micro_batches(batch: TensorDict, max_token_len, dp_group=None):
     print("max_token_len:", max_token_len)
     # this is per local micro_bsz
     max_seq_len = batch["attention_mask"].shape[-1]
-    assert max_token_len >= max_seq_len, f"max_token_len must be greater than the sequence length. Got {max_token_len=} and {max_seq_len=}"
+    if max_token_len < max_seq_len:
+        print(f"[WARNING] Truncating sequences from {max_seq_len} to {max_token_len} to fit micro-batch limit")
+        # Truncate attention_mask and all tensor fields to max_token_len from the right
+        batch["attention_mask"] = batch["attention_mask"][:, :max_token_len]
+        if "responses" in batch:
+            batch["responses"] = batch["responses"][:, :max_token_len]
+        if "input_ids" in batch:
+            batch["input_ids"] = batch["input_ids"][:, :max_token_len]
+        if "position_ids" in batch:
+            batch["position_ids"] = batch["position_ids"][:, :max_token_len]
+        if "prompts" in batch:
+            batch["prompts"] = batch["prompts"][:, :max_token_len]
+        if "response_mask" in batch:
+            batch["response_mask"] = batch["response_mask"][:, :max_token_len]
+        if "loss_mask" in batch:
+            batch["loss_mask"] = batch["loss_mask"][:, :max_token_len]
+        max_seq_len = max_token_len
 
     seq_len_effective: torch.Tensor = batch["attention_mask"].sum(dim=1)
     total_seqlen = seq_len_effective.sum().item()
