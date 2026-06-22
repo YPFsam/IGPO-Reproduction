@@ -6,6 +6,25 @@
 # License: Apache 2.0
 # Project URL: https://github.com/PeterGriffinJin/Search-R1
 # =============================================================================
+#
+# ===================== IGPO 中文阅读注释（核心文件）======================
+# 这个文件是 IGPO 的心脏：实现「多轮搜索 Agent Loop」。
+#
+# 核心思想：模型对每个问题最多进行 max_turns 轮交互。每一轮：
+#   1) 用 reference 模型计算 P(ground_truth | 当前上下文)，记为 log_prob_old
+#   2) actor 模型生成 response（思考 + 工具调用/答案）
+#   3) 解析 response：
+#        - 含 <answer> → 该 rollout 结束
+#        - 含 <tool_call> → 执行 web_search（本地 BM25），结果追加上下文
+#   4) 用 reference 模型计算 P(ground_truth | 新上下文)，记为 log_prob_new
+#      info_gain[turn] = log_prob_new - log_prob_old  ← 这就是 IGPO 的内在奖励
+#
+# 全部轮次结束后，info_gain 序列会传给 reward 计算和 advantage 计算。
+#
+# ⚠️ 本项目相对原版的关键改动（Qwen3 适配）：
+#   - L436-439：删除手动 append think 标签（Qwen3-Thinking chat template 已自动注入）
+#   - L670 附近：tool 结果序列化为字符串（Qwen3 chat template 要求 content 为 str）
+# =========================================================================
 
 import torch
 import copy
@@ -42,25 +61,28 @@ from tools_server.initialize_prompts import SYSTEM_PROMPT
 
 @dataclass
 class GenerationConfig:
-    max_turns: int
-    num_gpus: int
+    """生成配置：控制 Agent Loop 的核心参数。"""
+    max_turns: int          # 最大搜索轮次（本项目 2wiki 模式=5；GRPO 消融=1）
+    num_gpus: int           # 生成用的 GPU 数
     data_writing_path: str = None
     model_name: str = None
-    n: int = 1
+    n: int = 1              # 每个问题的 rollout 数（GRPO 组大小，本项目=8）
     project_name: str = None
     experiment_name: str = None
-    search_engine: str = "online_search"
+    search_engine: str = "online_search"  # 本项目改为 "local"（本地 BM25）
     nnodes: int = 1
     oss_access_key_id: str = ''
     oss_access_key_secret: str = ''
     oss_endpoint: str = ''
     system_prompt: Optional[str] = SYSTEM_PROMPT
-    codeact_env_disabled: bool = True
+    codeact_env_disabled: bool = True  # True=只允许 web_search，禁用代码执行
     # info_gain_type: "prob_diff" (probability difference) or "log_prob_diff" (log probability difference)
+    # 本项目用 "log_prob_diff"（对数概率差），更稳定
     info_gain_type: str = "prob_diff"
-    
+
 
 class LLMGenerationManager:
+    """Agent Loop 管理器：驱动多轮搜索生成，收集每轮的 info_gain。"""
     def __init__(
         self,
         tokenizer,
@@ -139,6 +161,9 @@ class LLMGenerationManager:
     def execute_predictions(
         self, tool_call_list, total_number
     ) :
+        """执行工具调用：把 tool_call 列表提交给搜索服务（本地 BM25 / 在线 API），返回搜索结果。
+        tool_call_list 每项: (rollout_idx, question, think_content, tool_call_dict)
+        本项目走本地 tantivy 服务（port 8890），client.submit_tasks 会批量查询。"""
         query_contents = [{"idx": tool_call[0], "question": tool_call[1], "think": tool_call[2],
                            "tool_call": tool_call[3], "total_number":total_number} for tool_call in tool_call_list]
 
@@ -198,8 +223,19 @@ class LLMGenerationManager:
         return query_contents
 
     def parse_response(self, input_ids: torch.Tensor, think: bool = False) -> List[Tuple[bool, str, str]]:
-        """Parse response to get the thinking process and answer or tool call.
-            return: [(is_stop, thinking, answer/tool_call), ...]
+        """解析模型生成的 response，判断该 rollout 是「给答案」还是「继续搜索」。
+
+        返回三元组列表 [(is_stop, thinking, answer/tool_call), ...]：
+          - is_stop=True  → 该 rollout 结束（含 <answer> 或格式错误）
+          - is_stop=False → 要继续搜索，第三项是解析出的 tool_call dict
+
+        三种识别分支：
+          1) 含 <think>...</think> + <answer>...</answer>  → 给答案，is_stop=True
+          2) 含 <think> + <tool_call>{json}</tool_call>    → 工具调用，is_stop=False
+          3) 含 <think> + <code>                            → 代码执行（本项目禁用，codeact_env_disabled=True）
+          4) 其余 → 格式不规范，强制结束 is_stop=True（会在 reward 里被 -2 惩罚）
+
+        注意：think=True 时手动补 "<think>" 前缀，因为生成时 think 开头被截断。
         """
         response_contents = self.tokenizer.batch_decode(input_ids)
         results = []
@@ -207,30 +243,34 @@ class LLMGenerationManager:
             if think:
                 content = "<think>" + content
             if "<think>" in content and "<answer>" in content:
+                # 分支1：模型给了最终答案
                 if "</think>" not in content or "</answer>" not in content:
-                    results.append((True, "", ""))
+                    results.append((True, "", ""))  # 标签未闭合 → 格式错误
                 else:
                     think_content = content.split("<think>")[1].split("</think>")[0]
                     answer = content.split("<answer>")[1].split("</answer>")[0]
                     results.append((True, think_content, answer))
             elif "<think>" in content and "<tool_call>" in content and self.codeact_env_disabled:
+                # 分支2：模型要调用搜索工具
                 if "</tool_call>" not in content or "</think>" not in content:
-                    results.append((True, "", ""))
+                    results.append((True, "", ""))  # 标签未闭合 → 格式错误
                 else:
                     think_content = content.split("<think>")[1].split("</think>")[0]
                     tool_call = content.split("<tool_call>")[1].split("</tool_call>")[0]
                     try:
-                        tool_call = json.loads(tool_call)
+                        tool_call = json.loads(tool_call)  # tool_call 必须是合法 JSON
                         assert "name" in tool_call, "no vliad function name in tool_call"
                         assert "arguments" in tool_call, "no valid arguments in tool_call"
                         assert tool_call["name"] not in [""], "invalid tool name"
                         results.append((False, think_content, tool_call))
                     except Exception as e:
+                        # JSON 解析失败 → 格式错误，强制结束（reward -2）
                         if i < 10:
                             print(f"model tool call format error: {e}")
                             print(content.replace('<|endoftext|>',''))
                         results.append((True, "", ""))
             elif "<think>" in content and "<code>" in content and not self.codeact_env_disabled:  # code act format
+                # 分支3：代码执行模式（本项目 codeact_env_disabled=True，不会走到这）
                 if "</code>" not in content or "</think>" not in content:
                     results.append((True, "", ""))
                 else:
@@ -245,6 +285,7 @@ class LLMGenerationManager:
                             print(content.replace('<|endoftext|>',''))
                         results.append((True, "", ""))
             else:
+                # 分支4：无法识别 → 强制结束（reward -2）
                 results.append((True, "", ""))
         return results
 
@@ -282,15 +323,33 @@ class LLMGenerationManager:
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
     def run_llm_loop(self, gen_batch: DataProto, global_steps: int, ground_truths: list) -> Tuple[Dict, Dict]:
-        """Run main LLM generation loop."""
+        """【IGPO 主循环】对每个问题展开 n 次 rollout，最多 max_turns 轮搜索。
 
+        这是整个项目最关键的函数。流程：
+          1) 把 batch 中每个问题 repeat n 次（GRPO 组大小），每条 rollout 独立搜索轨迹
+          2) 预处理 ground_truth（处理多标签、answer_split 等）
+          3) 进入 for step in range(max_turns) 主循环（见 L436）：
+             - 用 ref 模型算 P(gt | 上下文)  ← info gain 的"前"状态
+             - actor 生成 → parse_response → 搜索 or 给答案
+             - 算 P(gt | 新上下文) ← info gain 的"后"状态
+             - info_gain[step] = log P(后) - log P(前)
+          4) 全部结束后，info_gain 序列 + 最终答案一起返回给 reward 计算
 
+        参数：
+          gen_batch: 输入 prompt batch（每条=1个问题）
+          ground_truths: 标准答案列表（用于算 info gain 和 F1）
+
+        返回：(rollout 数据 dict, info_gain 数据 dict)
+        """
         node_rank = int(os.environ.get("PET_NODE_RANK", 0))
         print(f"node {node_rank} gains {len(gen_batch.batch['input_ids'])} * {self.config.n} datas!", flush=True)
         query_contents = self.parse_question(gen_batch.batch['input_ids'])
-        
+
         messages_list = []
         agent_grpo_idx = []
+        # 预处理 ground_truth：
+        #  - <|answer_split|> 分隔多答案时，只取第一个（NQ/TQ 数据常见）
+        #  - 列表型答案（是/否类）合并成单个 label
         for gt in ground_truths:
             if "<|answer_split|>" in gt['ground_truth']:
                 gt['ground_truth'] = gt['ground_truth'].split("<|answer_split|>")[0]
@@ -411,12 +470,17 @@ class LLMGenerationManager:
             if VERIFY_VECTORIZED:
                 print(f"[IGPO] Verification mode: will also compute original mode for comparison")
 
+        # ===================== Agent Loop 主循环 =====================
+        # 每一轮：只处理 activate_list 里"还没给出答案"的 rollout。
+        # 已经给出 <answer> 的 rollout 会从 activate_list 移除（见循环末尾）。
         for step in range(self.config.max_turns):
             print(f"node {node_rank} step {step} start!")
             activate_messages_list = [messages_list[i] for i in activate_list]
 
             if activate_list == []:
-                break
+                break  # 所有 rollout 都已结束，提前退出
+            # 把对话历史套上 chat template（加 <|im_start|> 等特殊 token）
+            # add_generation_prompt=True 会追加 assistant 角色开头，让模型续写
             try:
                 rollings_active = self.tokenizer.apply_chat_template(activate_messages_list, add_generation_prompt=True, tokenize=False)
             except Exception as e:
@@ -430,9 +494,15 @@ class LLMGenerationManager:
                     except Exception as inner_e:
                         print(f"Failed to process message: {inner_e}")
                         raise  # Cannot recover, raise exception
-    
-            think = True
-            
+
+            think = True  # 生成时 think 开头会被截断，parse 时手动补 <think>
+
+            # ⚠️【Qwen3 适配 debug 点 - 最重要的一处】
+            # Qwen3-Thinking 的 chat template 在 add_generation_prompt=True 时
+            # 已经自动注入了 think 开头（含换行）。原版 Qwen2.5 代码这里会手动
+            # 再 append 一个换行，导致 <think> 双重注入，check_tags_balance 失败
+            # （31/32 rollout 格式错误）。修复：删掉手动 append。
+            # 旧代码（已删）：rollings_active = [rolling + "..." for rolling in rollings_active]
             # Qwen3 chat template with add_generation_prompt=True already appends "​​​​​​​\n"
             # Do NOT append another one here - duplicate think tags cause
             # check_tags_balance to fail (31/32 format errors).
@@ -673,12 +743,18 @@ class LLMGenerationManager:
                         }
                     )
                     try:
+                        # ⚠️【Qwen3 适配 debug 点】
+                        # 搜索结果是 list/dict（BM25 返回的多条 passage）。
+                        # Qwen3 的 chat template 要求 message.content 是 string，
+                        # 原版（Qwen2.5）直接传 list 不会崩，但 Qwen3 会。
+                        # 修复：json.dumps 序列化成字符串。
                         # Serialize search results to string for Qwen3 chat template compatibility
                         raw_content = tool_call_list[i]['content']
                         if isinstance(raw_content, (list, dict)):
                             content_str = json.dumps(raw_content, ensure_ascii=False)
                         else:
                             content_str = str(raw_content) if raw_content else 'No results'
+                        # 把搜索结果作为 tool 角色消息追加到上下文，下一轮模型就能看到
                         messages_list[tool_call_list[i]['idx']].append(
                             {
                                 "role": "tool",
